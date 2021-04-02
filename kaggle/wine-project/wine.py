@@ -1,110 +1,127 @@
-from keras import models
-from keras import layers
 import numpy as np
 import pandas as pd
-import tensorflow as tf
-import matplotlib.pyplot as plt
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
 
-from keras import backend as K
+from nltk.corpus import stopwords
+from nltk.stem.porter import PorterStemmer
+from wordcloud import WordCloud, STOPWORDS
+from nltk.tokenize import RegexpTokenizer
 
-def root_mean_squared_error(y_true, y_pred):
-        return K.sqrt(K.mean(K.square(y_pred - y_true)))
+from sklearn.feature_extraction.text import CountVectorizer,TfidfVectorizer
+from sklearn.model_selection import train_test_split
+from catboost import Pool, CatBoostRegressor, cv
 
-print("start")
+import nltk
+import string
+import re
 
-train_file = '/content/drive/MyDrive/Colab Notebooks/wine/wine_train.csv'
-test_file = '/content/drive/MyDrive/Colab Notebooks/wine/wine_test.csv'
+data = pd.read_csv('/content/drive/MyDrive/Colab Notebooks/wine/wine_train.csv', index_col='id')
+test_data = pd.read_csv('/content/drive/MyDrive/Colab Notebooks/wine/wine_test.csv', index_col='id')
 
-train_data_full = pd.read_csv(train_file, index_col='id')
-test_data_full = pd.read_csv(test_file, index_col='id')
+# descriptionÍ≥º titleÏù¥ Í∞ôÏùÄ Ï§ëÎ≥µÍ∞í Ï†úÍ±∞
+data=data.drop_duplicates(['description','title'])
+data=data.reset_index(drop=True)
+data=data.fillna(-1)
 
-# predictor variable∞˙ target variable¿ª ∫–∏Æ
-train_targets = train_data_full['points']
-train_data_full.drop(['points'], axis=1, inplace=True)
+# NLP
+data['description']= data['description'].str.lower()
+data['description']= data['description'].apply(lambda elem: re.sub('[^a-zA-Z]',' ', elem))
 
-feature_columns = ['country', 'region_1', 'price', 'province', 'taster_name', 'variety']
-train_raw_data = train_data_full[feature_columns].copy()
-test_raw_data = test_data_full[feature_columns].copy()
+test_data['description']= test_data['description'].str.lower()
+test_data['description']= test_data['description'].apply(lambda elem: re.sub('[^a-zA-Z]',' ', elem))
 
-# preprocessing train data
-categorical_columns = ['country', 'region_1', 'province', 'taster_name', 'variety']
+tokenizer = RegexpTokenizer(r'\w+')
+words_descriptions = data['description'].apply(tokenizer.tokenize)
 
-categorical_transformer = Pipeline(steps=[
-    ('imputer', SimpleImputer(strategy='most_frequent', fill_value='missing')),
-    ('encoder', OneHotEncoder(handle_unknown='ignore', sparse=False))])
+test_words_descriptions = test_data['description'].apply(tokenizer.tokenize)
 
-categorical_train_data = pd.DataFrame(categorical_transformer.fit_transform(train_raw_data[categorical_columns]))
-categorical_train_data.index = train_raw_data.index
+data['description_lengths']= [len(tokens) for tokens in words_descriptions]
 
-numerical_train_data = train_raw_data.drop(categorical_columns, axis=1)
-my_imputer = SimpleImputer(strategy='mean')
-imputed_train_data = pd.DataFrame(my_imputer.fit_transform(numerical_train_data))
-imputed_train_data.index = numerical_train_data.index
+test_data['description_lengths']= [len(tokens) for tokens in test_words_descriptions]
 
-train_data = pd.concat([imputed_train_data, categorical_train_data], axis=1)
-# preprocessing test data
-categorical_test_data = pd.DataFrame(categorical_transformer.transform(test_raw_data[categorical_columns]))
-categorical_test_data.index = test_raw_data.index
+# Î∂àÏö©Ïñ¥(stopwords) Ï†úÍ±∞
+stopword_list = stopwords.words('english')
+ps = PorterStemmer()
 
-numerical_test_data = test_raw_data.drop(categorical_columns, axis=1)
-imputed_test_data = pd.DataFrame(my_imputer.transform(numerical_test_data))
-imputed_test_data.index = numerical_test_data.index
+words_descriptions = words_descriptions.apply(lambda elem: [word for word in elem if not word in stopword_list])
+words_descriptions = words_descriptions.apply(lambda elem: [ps.stem(word) for word in elem])
+data['description_cleaned'] = words_descriptions.apply(lambda elem: ' '.join(elem))
 
-test_data = pd.concat([imputed_test_data, categorical_test_data], axis=1)
+test_words_descriptions = test_words_descriptions.apply(lambda elem: [word for word in elem if not word in stopword_list])
+test_words_descriptions = test_words_descriptions.apply(lambda elem: [ps.stem(word) for word in elem])
+test_data['description_cleaned'] = test_words_descriptions.apply(lambda elem: ' '.join(elem))
 
-# data normalize
-mean = train_data.mean(axis=0)
-train_data -= mean
-std = train_data.std(axis=0)
-train_data /= std
+def year_match(name):
+    m = re.findall("(\d{4})",name)
+    if len(m) == 0:
+        return None
+    else:
+        return m[0]
 
-# test data∏¶ ¡§±‘»≠«“ ∂ßø°µµ train data ¿« mean , std ªÁøÎ
-test_data -= mean 
-test_data /= std
+data['year'] = data['title'].apply(year_match)
+test_data['year'] = test_data['title'].apply(year_match)
 
-def build_model():
-  model = models.Sequential()
-  model.add(layers.Dense(64, activation='relu',
-                         input_shape=(train_data.shape[1],)))
-  model.add(layers.Dense(64, activation='relu'))
-  model.add(layers.Dense(1))
-  model.compile(optimizer='rmsprop', loss='mse', metrics=[tf.keras.metrics.RootMeanSquaredError(name='rmse')])
-  return model
+def prepare_dataframe(vect, data):
+    y = data['points']
+    X = data.drop(columns=['points','taster_twitter_handle','description','title'])
 
-# cross validation
-k = 5
-num_val_samples = len(train_data) // k
-num_epochs = 100
-all_scores = []
+    X_train, X_valid, y_train, y_valid = train_test_split(X, y, test_size=0.2, random_state=52)
 
-for i in range(k):
-  print('√≥∏Æ¡ﬂ¿Œ ∆˙µÂ #', i)
-  val_data = train_data[i * num_val_samples: (i+1) * num_val_samples]
-  val_targets = train_targets[i * num_val_samples: (i+1) * num_val_samples]
+    vectorized = vect.fit_transform(X_train['description_cleaned']).toarray()
+    vectorized = pd.DataFrame(vectorized)
+    X_train = X_train.drop(columns=['description_cleaned'])
+    X_train = X_train.fillna(-1)
+    print(X_train.columns)
+    X_train = pd.concat([X_train.reset_index(drop=True), vectorized.reset_index(drop=True)], axis=1)
 
-  partial_train_data = np.concatenate(
-      [train_data[:i * num_val_samples],
-       train_data[(i+1) * num_val_samples:]],
-       axis=0
-  )
-  partial_train_targets = np.concatenate(
-      [train_targets[:i * num_val_samples],
-       train_targets[(i+1) * num_val_samples:]],
-       axis=0
-  )
+    vectorized_valid = vect.transform(X_valid['description_cleaned']).toarray()
+    vectorized_valid = pd.DataFrame(vectorized_valid)
+    X_valid = X_valid.drop(columns=['description_cleaned'])
+    X_valid = X_valid.fillna(-1)
+    print(X_valid.columns)
+    X_valid = pd.concat([X_valid.reset_index(drop=True), vectorized_valid.reset_index(drop=True)], axis=1)
+    
+    categorical_features_indices =[0,1,3,4,5,6,7,8,10]
+    
+    return X_train, y_train, X_valid, y_valid, categorical_features_indices
 
-  model = build_model()
-  model.fit(partial_train_data, partial_train_targets,
-            epochs=num_epochs, batch_size=1, verbose=2)
-  val_mse, val_mae = model.evaluate(val_data, val_targets, verbose=0)
-  all_scores.append(val_mae)
+def prepare_dataframe_test(vect, data):
+    vectorized=vect.transform(data['description_cleaned']).toarray()
+    vectorized=pd.DataFrame(vectorized)
 
-test_preds = model.predict(test_data)
+    X=data.drop(columns=['taster_twitter_handle','description','description_cleaned','title'])
+    X=X.fillna(-1)
+    print(X.columns)
+    X=pd.concat([X.reset_index(drop=True),vectorized.reset_index(drop=True)],axis=1)
 
-# Submission ∆ƒ¿œ¿ª ª˝º∫«—¥Ÿ
-my_submission = pd.DataFrame({'id': test_data.index, 'points': test_preds.ravel()})
-my_submission.to_csv('wine_my_submission.csv', index=False)
+    return X
+
+#model definintion and training.
+def perform_model(X_train, y_train, X_valid, y_valid, categorical_features_indices, name):
+    model = CatBoostRegressor(
+        random_seed = 100,
+        loss_function = 'RMSE',
+        iterations=2000,
+    )
+    
+    model.fit(
+        X_train, y_train,
+        cat_features = categorical_features_indices,
+        verbose=False,
+        eval_set=(X_valid, y_valid)
+    )
+    
+    train_preds = model.predict(X_train)
+    print('RMSE: {}'.format(mean_squared_error(y_train, train_preds, squared=False)))
+
+    valid_preds = model.predict(X_valid)
+    print('RMSE: {}'.format(mean_squared_error(y_valid, valid_preds, squared=False)))
+
+    test_preds = model.predict(X_test)
+
+    my_submission = pd.DataFrame({'id': test_data.index, 'points': test_preds})
+    my_submission.to_csv('wine_my_submission.csv', index=False)
+
+vect = CountVectorizer(analyzer='word', token_pattern=r'\w+',max_features=500)
+training_variable = prepare_dataframe(vect, data)
+X_test = prepare_dataframe_test(vect, test_data)
+perform_model(*training_variable, 'Bag of Words Counts')
